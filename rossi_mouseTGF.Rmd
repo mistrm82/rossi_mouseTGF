@@ -1,0 +1,399 @@
+---
+title: "Rossi - Mouse 3'UTR Arrays"
+author: "Meeta Mistry"
+date: "09/03/2015"
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_depth: 4
+    fig_caption: true
+    fig_width: 7
+    fig_height: 6
+---
+
+```{r setup, echo=FALSE}
+ 
+# Setup report details
+clientname="Brian Garrison"
+clientemail="Brian.Garrison@childrens.harvard.edu "
+lablocation="Rossi Lab" 
+analystname="Meeta Mistry"
+analystemail="mmistry@hsph.harvard.edu"
+```
+
+RNA-Seq analysis for `r clientname` (`r clientemail`) at `r lablocation`. Contact `r analystname` (`r analystemail`) for additional details. Request from client was:  
+
+> The experiment is comprised of 3 WT and 3 gene KO arrays (Mouse Exon 1.0ST) all processed together at the same time. The gene KO is a TGF-beta regulator (Nrros) and is knocked out using a Lacz knock-in between exons 3 and 4. We are especially interested in TGF-beta genes and TGF-beta response genes/pathways (e.g. TGF-beta KEGG Pathway).  That said, the KO microglia do behave differently than the WT, and so of course we are also interested in the other genes/pathways that are up/down that may affect the cell's biological function. 
+
+## Setup
+### Bioconductor and R libraries used
+
+```{r libraries, echo=TRUE}
+loadlibs <- function(){
+library(oligo)
+library(limma)
+library(arrayQualityMetrics)
+library(moex10sttranscriptcluster.db)
+library(pd.moex.1.0.st.v1)
+library(ggplot2)
+library(reshape)
+library(pheatmap)
+library(RColorBrewer)
+library(CHBUtils)
+library(ggdendro)
+library(gProfileR)
+source('revigo.R') ## for GO analysis
+}
+suppressPackageStartupMessages(loadlibs())
+```
+
+
+### Set variables
+```{r directories, echo=TRUE}
+baseDir=getwd()
+dataDir=paste(baseDir, "/rawdata", sep="")
+resultsDir=paste(baseDir, "/results", sep="")
+metaDir=paste(baseDir, "/meta", sep="")
+
+heatcolors.1 <- rev(brewer.pal(6, "YlOrRd"))
+```
+
+
+## Load Data
+
+```{r load-data, warning=FALSE, message=FALSE}
+
+covars <- read.delim(file.path(metaDir, 'covars.desc'), row.names=1, sep="\t", header=T) # simple tab delimited file with CEL file in first column (no heading for this column) and sample metadata (i.e. sampleID, treatment group, batch etc.) in subsequent columns
+
+celFiles <- file.path(dataDir, row.names(covars))
+affyRaw <- read.celfiles(celFiles)
+pData(affyRaw) <- covars 
+sampleNames(affyRaw) <- pData(affyRaw)$samplename
+validObject(affyRaw)
+rm(covars)
+```
+
+## Quality Control
+Using the arrayQualityMetrics package, we performed QC in the samples. Based on the [QC report](./report_raw/index.html) it appears that the the arrays look good and cluster hierarchically by genotype. 
+
+
+```{r, eval=FALSE}
+arrayQualityMetrics(expressionset=affyRaw, outdir=file.path(resultsDir, 'report_raw'), 
+                    force=TRUE, do.logtransform=TRUE, intgroup=c("genotype"))
+```
+
+
+## Background correct and normalize
+
+When working with an ExonFeatureSet object, processing to the probeset level provides expression summaries at the exon level and can be obtained by setting the argument target to "probeset", as presented below. For Exon arrays, Affymetrix provides additional annotation files that define meta-probesets (MPSs), used to summarize the data to the gene level. These MPSs are classified in three groups – 'core', 'extended' and 'full' – depending on the level of confidence of the sources used to generate such annotations. We have used the 'core' annotations below.
+
+```{r normalize, warning=FALSE, message=FALSE}
+# At probeset level
+probesetSummaries <- rma(affyRaw, target="probeset")
+
+# At geneset level
+geneSummaries <- rma(affyRaw, target="core")
+```
+
+### Correlations
+An inter-correlation analysis (ICA) helps us assess any structure based on the expression data and also identify potential outliers. Each sample is considered a vector of expression values corresponding to each probe. Pearson correlations are computed for all pairwise combinations of samples, and plotted as a symmetrical heatmap. The samples cluster very well by genotype, with no outliers present. 
+
+```{r correlation, echo=FALSE, fig.align='center'}
+expression<-exprs(geneSummaries)
+colnames(expression) <- pData(geneSummaries)$samplename
+
+annotation <- data.frame(sampletype=pData(geneSummaries)[,'genotype'], row.names=colnames(expression))
+pheatmap(cor(expression), color = heatcolors.1, cluster_rows = T, 
+         annotation=annotation, border_color=NA,
+         cluster_cols = T, show_colnames = T, clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean", 
+         fontsize = 10, fontsize_row = 10, height=20)
+```
+
+
+### Principal Component Analysis (PCA)
+A PCA is a dimension reduction and visualization technique that is used to project the multivariate (i.e.multiple genes) data vector of each array into a lower-dimensional plot, such that the spatial arrangement of the points in the plot reflects the overall data (dis)similarity between the arrays. The data is typically reduced to a small number of dimensions (or components) which explain most of the sample variability. Using the first two principal components, we observe a clear demarkation of samples between WT and KO with PC1 but with PC2 we see that KO samples are not as tightly grouped (indicating larger within group variance). 
+
+```{r pca1, echo=FALSE, fig.align='center'}
+# Perform PCA (requires transformed data matrix)
+pca_obj <- prcomp(t(exprs(geneSummaries)))
+# Extract the table containing eigenvalues for the principal  components
+pca_matrix <- pca_obj$x
+
+# Create data frame for input to ggplot
+df <- cbind(pData(geneSummaries), pca_matrix[,c('PC1', 'PC2')])
+
+# Plot with sample names used as data points
+ggplot(df, aes(PC1, PC2, color = genotype)) + 
+  theme_bw() +
+  geom_text(aes(PC1, PC2, label = samplename), size = 5, hjust=0.1, vjust=0.1) +
+  scale_x_continuous(expand = c(0.3,  0.3)) +
+  theme(plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25)))
+
+# Plot first four principal components
+# plot(as.data.frame(pca_matrix[,1:4]), col=c("purple", "darkgreen")[pData(geneSummaries)[,'genotype']], pch=19)
+```
+
+### Hierarchical Clustering
+Again, samples tend to cluster by genotype, which is in concordance with PC1 which explains 72% of the variance.
+
+```{r cluster, fig.align='center', echo=FALSE}
+
+# Dendrogram
+  meta.x <- pData(geneSummaries)
+  myDist <- dist(t(exprs(geneSummaries)))
+  myTree <-hclust(myDist)
+  dhc <- as.dendrogram(myTree)
+  ddata <- dendro_data(dhc, type="rectangle")
+  ddata$labels <- merge(ddata$labels, meta.x, by.x="label", by.y="row.names")
+
+ggplot(segment(ddata)) +
+    geom_segment(aes(x=x, y=y, xend=xend, yend=yend)) +
+    theme_dendro() +
+    geom_text(data=label(ddata), aes(x=x, y=y, label=label, color= label(ddata)[['genotype']], 
+                                     hjust=-0.1), size=6) +
+    coord_flip() + scale_y_reverse(expand=c(0.2, 50)) +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.title.x=element_blank(),
+          axis.title.y=element_blank(),
+          legend.title=element_blank())
+```
+
+
+## Annotate and filter
+
+```{r annotate, warning=FALSE, message=FALSE}
+
+# this will load the Affymetrix annotation, including the probeID, into the fData
+featureData(geneSummaries) <- getNetAffx(geneSummaries, "transcript") 
+
+# Get all thedesired annotations from the database
+annot <- data.frame(SYMBOL=sapply(contents(moex10sttranscriptclusterSYMBOL), paste, collapse=","),
+                    CHR=sapply(contents(moex10sttranscriptclusterCHR), paste, collapse=","),
+                    ENSEMBLID=sapply(contents(moex10sttranscriptclusterENSEMBL), paste, collapse=","),
+                    CHRLOC=sapply(contents(moex10sttranscriptclusterCHRLOC), paste, collapse=","),
+                    CHRLOCEND=sapply(contents(moex10sttranscriptclusterCHRLOCEND), paste, collapse=","))
+
+# Match the rows to our data matrix
+m <- match(row.names(exprs(geneSummaries)), row.names(annot))
+fData(geneSummaries)$seqname <- annot[m, 'CHR']
+fData(geneSummaries)$start <- annot[m, 'CHRLOC']
+fData(geneSummaries)[,6] <- annot[m, 'CHRLOCEND']
+fData(geneSummaries)$symbol <- annot[m, 'SYMBOL']
+fData(geneSummaries)$ensembl <- annot[m, 'ENSEMBLID']
+
+# Filter out control probes and intron probes
+geneSummaries <- geneSummaries[which(fData(geneSummaries)$category=="main"),]
+```
+
+
+## Linear modeling
+A linear model for microarray data analysis ([Limma][http://www.bioconductor.org/packages/release/bioc/html/limma.html]) was performed on the samples to identify differentially expressed genes for the comparison of WT versus KO. Limma fits a linear model to the expression data for all samples for each gene and is designed to handle complex experiments involving comparisons between many RNA targets simultaneously.
+
+To perform limma, we construct a design matrix which provides a representation of the different sample groups which have been analysed. Since we have only a single factor and two levels/groups to compare, we can model the intercept with the genotype factor and evaluate changes with respect to the wildtype samples.
+
+```{r}
+# Make design matrix
+pData(geneSummaries)$genotype <- relevel(pData(geneSummaries)$genotype, ref="WT")
+design <- model.matrix(~ genotype,  data=pData(geneSummaries))
+
+# Fit model
+fit.core <- lmFit(geneSummaries, design) 
+fit.core <- eBayes(fit.core)
+
+# Results
+p.cutoff <- 0.05
+fc.cutoff <- 2.0
+results <- topTable(fit.core, coef=2, number=nrow(exprs(geneSummaries)))
+results$threshold <- as.logical(abs(results$logFC) > fc.cutoff & results$adj.P.Val < p.cutoff)
+```
+
+### Volcano Plot
+Here we can visualize the relationship between the fold changes in expression and log transformed adjusted p-values generated from linear modeling. Each data point represents a gene. **Genes are identified as significant if the adjusted p-value < 0.05 and the log2FC > 2 **. In the volcano plot there are 229 significant genes which are plotted in purple.
+
+```{r volcano-new, echo=FALSE, fig.align='center'}
+# volcano_density_plot(res2[,c("logFC", "adj.P.Val")], pval.cutoff = 0.05, lfc.cutoff = 2)
+
+ggplot(data=results, aes(x=logFC, y=-log10(adj.P.Val), colour=threshold)) +
+  theme_bw() +
+  scale_color_manual(values = c("grey", "purple")) +
+  geom_point(alpha=0.75, pch=16) +
+  theme(legend.position = "none",
+        plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25))) +
+  xlim(c(-6, 6)) +
+  xlab("log2 fold change") + ylab("-log10 p-value")
+
+```
+
+### Heatmap of significant genes
+
+```{r heatmap-full, fig.align='center'}
+
+# Get expression data for significant genes
+sig_data <- exprs(geneSummaries)[row.names(results)[which(results$threshold)],]
+
+pheatmap(sig_data, color = heatcolors.1, cluster_rows = T, 
+         annotation=annotation, border_color=NA, show_rownames = F,
+         cluster_cols = T, show_colnames = T, clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean", 
+         fontsize = 10, fontsize_row = 10, height=20)
+```
+
+## GO Analysis
+
+We used the **229 genes (189 unique genes)** as input to [gProfileR](http://biit.cs.ut.ee/gprofiler/), a tool that performs statistical enrichment analysis to find over-representation of information like Gene Ontology terms, biological pathways, regulatory DNA elements, human disease gene annotations, and protein-protein interaction networks. The gene list was split in two based on direction of expression change. For a total of **100 up-regulated genes** we retrieve gprofiler results, for which the significant Gene Ontolgy terms were extracted and some of the top terms are highlighted in the table below:
+
+### Up-regulated
+
+```{r gprofiler-up, echo=FALSE, results='asis'}
+
+sig.up <- results$symbol[which(results$threshold & results$logFC > 0)]
+query <- unique(as.character(sig.up))
+query <- query[-1]
+  
+gprofiler_results_up  <- gprofiler(query = query, 
+            organism = "mmusculus",
+            ordered_query = F, 
+            exclude_iea = F, 
+            max_p_value = 0.05, 
+            max_set_size = 0,
+            correction_method = "fdr",
+            hier_filtering = "none", 
+            domain_size = "annotated",
+            custom_bg = "")
+
+gprof.table <- gprofiler_results_up[, c("term.id", "term.name", "p.value", "overlap.size", "precision","recall")]
+kable(head(gprof.table[order(gprof.table$p.value),], 10), format='markdown', row.names=F)
+```
+
+### Down-regulated
+For a total of **89 down-regulated genes** we retrieve gprofiler results, for which the significant Gene Ontolgy terms were extracted and some of the top terms are highlighted in the table below:
+
+```{r gprofiler-down, echo=FALSE, results='asis'}
+
+sig.down <- results$symbol[which(results$threshold & results$logFC < 0)]
+query <- unique(as.character(sig.down))
+query <- query[-1]
+  
+gprofiler_results_down  <- gprofiler(query = query, 
+            organism = "mmusculus",
+            ordered_query = F, 
+            exclude_iea = F, 
+            max_p_value = 0.05, 
+            max_set_size = 0,
+            correction_method = "fdr",
+            hier_filtering = "none", 
+            domain_size = "annotated",
+            custom_bg = "")
+
+gprof.table <- gprofiler_results_down[, c("term.id", "term.name", "p.value", "overlap.size", "precision","recall")]
+kable(head(gprof.table[order(gprof.table$p.value),], 10), format='markdown', row.names=F)
+```
+
+
+These terms were used as input to [REVIGO](http://revigo.irb.hr/) to visualize the most prominent processes and reduce redundancy of terms. Each rectangle is a single cluster representative, where terms sharing parent term at some level have been grouped together. The representatives are joined into ‘superclusters’ of loosely related terms, visualized with different colors. Size of the text reflect either the p-value, or the frequency of the GO term in the underlying GOA database. 
+
+## Up-regulated
+```{r GO-analysis-up, echo=FALSE, fig.align='center'}
+allterms <- gprofiler_results_up$term.id
+GOs <- allterms[grep('GO:', allterms)]
+pvals <- gprofiler_results_up$p.value[grep('GO:', allterms)]
+runRevigo(GOs, pvals)
+```
+
+## Down-regulated
+```{r GO-analysis-down, echo=FALSE, fig.align='center'}
+allterms <- gprofiler_results_down$term.id
+GOs <- allterms[grep('GO:', allterms)]
+pvals <- gprofiler_results_down$p.value[grep('GO:', allterms)]
+runRevigo(GOs, pvals)
+```
+
+
+## Files for Download
+
+* [Full normalized data matrix](./results/normalized_expression.txt)
+* [Full results table](./results/)
+* [Significant gene results (FC > 2)](./results/WT_vs_KO_FC2.0.results.txt)
+* [Significant gene results (FC > 1.5)](./results/WT_vs_KO_FC1.5.results.txt)
+* gProfiler results for [genes up-regulated in KO](./results/WT_vs_KO_gprofiler_up.txt) and [genes down-regulated in KO](./results/WT_vs_KO_gprofiler_down.txt)
+
+
+
+```{r write-res, eval=FALSE, echo=FALSE}
+
+# Results data
+out <- results[which(results$threshold), c("SYMBOL","CHR", "ENSEMBLID", "logFC", "P.Value", "adj.P.Val")]
+out <- out[order(out$logFC),]
+write.table(out, file="results/WT_vs_KO_FC2.0.resultsnew.txt", sep="\t", quote=F)
+
+# Expression data
+expression <- exprs(geneSummaries)
+ord <- c("WT_1", "WT_2", "WT_3", "KO_4", "KO_5", "KO_6")
+expression <- expression[,ord]
+gene <- as.character(fData(geneSummaries)[,'symbol'])
+ensembl <- as.character(fData(geneSummaries)[,'ensembl'])
+expression <- cbind(gene, ensembl, expression)
+write.table(expression, file="results/normalized_expression.txt", sep="\t", quote=F)
+
+```
+
+```{r nrros-exp, echo=FALSE, eval=FALSE}
+
+probes <- read.delim("annotationData//Nrros_mart_export.txt", header=T, sep="\t")
+Nrros <- probesetSummaries[which(row.names(probesetSummaries) %in% probes$Affy.MoEx.probeset),]
+
+exprNrros<-exprs(Nrros)
+colnames(exprNrros) <- pData(Nrros)$samplename
+
+annotation <- data.frame(genotype =pData(Nrros)[,'genotype'], row.names=colnames(exprNrros))
+pheatmap(exprNrros, color = heatcolors.1, cluster_rows = T, 
+         annotation=annotation, border_color=NA, scale="row",
+         cluster_cols = T, show_colnames = T, clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean", 
+         fontsize = 10, fontsize_row = 10, height=20)
+
+```
+### GAGE
+
+```{r gage}
+
+library(gage)
+
+# Find KEGG code
+org <- "mus musculus"
+species <- unlist(sapply(1:ncol(korg), function(i) {
+  agrep(org, korg[, i])
+}))
+code <- korg[species, 1, drop = F]
+
+# Create a KEGG dataset
+kegg_mouse <- kegg.gsets(code)
+kegg.gs <- kegg_mouse$kg.sets[kegg_mouse$sigmet.idx]
+
+# Set sample groups
+ref_idx <- which(pData(geneSummaries)$genotype == "WT")
+samp_idx <-  which(pData(geneSummaries)$genotype == "KO")
+
+# Organize expression data 
+geneOnly  <- geneSummaries[which(fData(geneSummaries)$symbol != 'NA'),]
+expression <- exprs(geneOnly)  
+row.names(expression) <- fData(geneOnly)$entrez
+
+# Enrichment analysis
+native_kegg_fc <- gage(expression, 
+                       gsets = kegg.gs, 
+                       ref = ref_idx, 
+                       samp = samp_idx, 
+                       compare ="unpaired")
+
+```
+
+
+

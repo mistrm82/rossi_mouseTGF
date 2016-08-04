@@ -176,7 +176,8 @@ annot <- data.frame(SYMBOL=sapply(contents(moex10sttranscriptclusterSYMBOL), pas
                     CHR=sapply(contents(moex10sttranscriptclusterCHR), paste, collapse=","),
                     ENSEMBLID=sapply(contents(moex10sttranscriptclusterENSEMBL), paste, collapse=","),
                     CHRLOC=sapply(contents(moex10sttranscriptclusterCHRLOC), paste, collapse=","),
-                    CHRLOCEND=sapply(contents(moex10sttranscriptclusterCHRLOCEND), paste, collapse=","))
+                    CHRLOCEND=sapply(contents(moex10sttranscriptclusterCHRLOCEND), paste, collapse=","),
+                    ENTREZ=sapply(contents(moex10sttranscriptclusterENTREZID), paste, collapse=","))
 
 # Match the rows to our data matrix
 m <- match(row.names(exprs(geneSummaries)), row.names(annot))
@@ -185,6 +186,7 @@ fData(geneSummaries)$start <- annot[m, 'CHRLOC']
 fData(geneSummaries)[,6] <- annot[m, 'CHRLOCEND']
 fData(geneSummaries)$symbol <- annot[m, 'SYMBOL']
 fData(geneSummaries)$ensembl <- annot[m, 'ENSEMBLID']
+fData(geneSummaries)$entrez <- annot[m, 'ENTREZ']
 
 # Filter out control probes and intron probes
 geneSummaries <- geneSummaries[which(fData(geneSummaries)$category=="main"),]
@@ -207,14 +209,14 @@ fit.core <- eBayes(fit.core)
 
 # Results
 p.cutoff <- 0.05
-fc.cutoff <- 2.0
+fc.cutoff <- 1.5
 results <- topTable(fit.core, coef=2, number=nrow(exprs(geneSummaries)))
 results$threshold <- as.logical(abs(results$logFC) > fc.cutoff & results$adj.P.Val < p.cutoff)
 ```
 
 ### Volcano Plot
 Here we can visualize the relationship between the fold changes in expression and log transformed adjusted p-values generated from linear modeling. Each data point represents a gene. **Genes are identified as significant if the adjusted p-value < 0.05 and the log2FC > 2 **. In the volcano plot there are 229 significant genes which are plotted in purple.
-
+file:///home/mistrm82/R/rossi_mouseTGF/gsea/rossi_hallmark_sets_abs_genesetPermute.Gsea.1443560709686/index.html
 ```{r volcano-new, echo=FALSE, fig.align='center'}
 # volcano_density_plot(res2[,c("logFC", "adj.P.Val")], pval.cutoff = 0.05, lfc.cutoff = 2)
 
@@ -368,6 +370,7 @@ library(gage)
 
 # Find KEGG code
 org <- "mus musculus"
+data(korg)
 species <- unlist(sapply(1:ncol(korg), function(i) {
   agrep(org, korg[, i])
 }))
@@ -375,7 +378,7 @@ code <- korg[species, 1, drop = F]
 
 # Create a KEGG dataset
 kegg_mouse <- kegg.gsets(code)
-kegg.gs <- kegg_mouse$kg.sets[kegg_mouse$sigmet.idx]
+kegg.gs <- kegg_mouse$kg.sets[kegg_mouse$sig.idx]
 
 # Set sample groups
 ref_idx <- which(pData(geneSummaries)$genotype == "WT")
@@ -393,7 +396,119 @@ native_kegg_fc <- gage(expression,
                        samp = samp_idx, 
                        compare ="unpaired")
 
+# Visulaize TGF-beta signaling
+pathid <- "mmu04350"
+log_fc <- rowMeans(expression[, samp_idx])-rowMeans(expression[, ref_idx])
+
+pv_replication <- pathview(gene.data = log_fc, 
+                           gene.idtype = "KEGG", 
+                           pathway.id = pathid, 
+                           species = "mmu", 
+                           expand.node = TRUE,
+                           out.suffix = "TGF-beta siganling", 
+                           keys.align = "y", 
+                           kegg.native = T, 
+                           match.data = T, 
+                           key.pos = "topright")
+
 ```
 
+## GSVA
 
+```{r gsva}
+
+# Load libraries
+library(GSEABase)
+library(GSVAdata)
+library(Biobase)
+library(genefilter)
+library(limma)
+library(RColorBrewer)
+library(GSVA)
+
+# Load genesets
+gss <- getGmt("annotationData//Mouse_Human_KEGG_September_24_2015_Entrezgene.gmt", geneIdType = EntrezIdentifier(), sep="\t",
+              collectionType = KEGGCollection() )
+
+# Organize expression data 
+geneOnly  <- geneSummaries[which(fData(geneSummaries)$symbol != 'NA'),]
+
+# Filter by variance
+geneFiltered <- varFilter(geneOnly, var.func = IQR, var.cutoff =0.8, filterByQuantile = TRUE)
+expression <- exprs(geneFiltered)  
+row.names(expression) <- as.character(fData(geneFiltered)$entrez)
+
+
+# Run GSVA
+gsva_res <- gsva(expression, gset.idx.list = gss, method="gsva", min.sz=5, max.sz=1000, verbose=TRUE)
+
+# Linear modeling
+adjPvalueCutoff <- 0.05
+
+fit <- lmFit(gsva_res$es.obs, design)
+fit <- eBayes(fit)
+allGeneSets <- topTable(fit, coef="genotypeKO", number=Inf)
+DEgeneSets <- topTable(fit, coef="genotypeKO", number=Inf, p.value=adjPvalueCutoff, adjust="BH")
+res <- decideTests(fit, p.value=adjPvalueCutoff)
+summary(res)
+
+# Get expression data for significant genesets
+sig_data <- gsva_res$es.obs[row.names(DEgeneSets),]
+rnames <- sapply(row.names(sig_data), function(x){strsplit(x, "%")[[1]][1]})
+row.names(sig_data) <- unname(rnames)
+annotation <- data.frame(sampletype=pData(geneFiltered)[,'genotype'], row.names=colnames(expression))
+ann_colors = list(sampletype = c(WT="black", KO="darkgrey"))
+heatcolors.1 <- colorRampPalette(c("blue", "white", "red"))(12)
+
+tiff('Figure_gsva.tiff', width=800, height=800)
+pheatmap(sig_data, color = heatcolors.1, cluster_rows = T, annotation_colors = ann_colors,
+         annotation=annotation, border_color=NA, show_rownames = T,
+         cluster_cols = T, show_colnames = T, clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean", 
+         fontsize = 12, fontsize_row = 12, height=30)
+dev.off()
+
+```
+
+## PGSEA
+
+```{r gskb}
+
+# Load libraries
+library(gskb)
+library(PGSEA)
+
+# Load data
+data(mm_pathway)
+
+geneOnly  <- geneSummaries[which(fData(geneSummaries)$symbol != 'NA'),]
+expression <- exprs(geneOnly)  
+row.names(expression) <- toupper(as.character(fData(geneOnly)$symbol))
+
+# Gene centred by mean expression
+gse <- expression - apply(expression, 1, mean)
+
+# Run PGSEA
+pg <- PGSEA(gse, cl=mm_pathway, range=c(15,2000), p.value=NA)
+
+# Remove pathways that has all NAs. This could be due to that pathway has too few matching genes.
+pg2 <- pg[rowSums(is.na(pg))!= dim(gse)[2], ]
+
+# Difference in Average Z score in two groups of samples is calculated and the pathways are ranked by absolute value.
+diff <- abs( apply(pg2[,c(4,5,3)],1,mean) - apply(pg2[,c(6,1,2)], 1, mean) )
+pg2 <- pg2[order(-diff), c(4,5,3,6,1,2) ]
+
+# Plot
+sub <- factor( c( rep("WT",3),rep("KO",3) ) )
+smcPlot(pg2[1:15,],sub,scale=c(-12,12),show.grid=TRUE,margins=c(1,1,7,19),col=.rwb)
+
+tiff('Figure_pgsea.tiff', width=1000, height=800)
+pheatmap(pg2[1:20,], color = heatcolors.1, cluster_rows = T, annotation_colors = ann_colors,
+         annotation=annotation, border_color=NA, show_rownames = T,
+         cluster_cols = T, show_colnames = T, clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean", 
+         fontsize = 12, fontsize_row = 12, height=30)
+dev.off()
+
+```
 
